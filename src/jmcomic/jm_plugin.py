@@ -278,8 +278,9 @@ class ZipPlugin(JmOptionPlugin):
 
     # noinspection PyAttributeOutsideInit
     def invoke(self,
-               album: JmAlbumDetail,
                downloader,
+               album: JmAlbumDetail = None,
+               photo: JmPhotoDetail = None,
                delete_original_file=False,
                level='photo',
                filename_rule='Ptitle',
@@ -298,7 +299,7 @@ class ZipPlugin(JmOptionPlugin):
         mkdir_if_not_exists(zip_dir)
 
         path_to_delete = []
-        photo_dict = downloader.download_success_dict[album]
+        photo_dict = self.get_downloaded_photo(downloader, album, photo)
 
         if level == 'album':
             zip_path = self.get_zip_path(album, None, filename_rule, suffix, zip_dir)
@@ -313,6 +314,13 @@ class ZipPlugin(JmOptionPlugin):
             ExceptionTool.raises(f'Not Implemented Zip Level: {level}')
 
         self.after_zip(path_to_delete)
+
+    def get_downloaded_photo(self, downloader, album, photo):
+        return (
+            downloader.download_success_dict[album]
+            if album is not None  # after_album
+            else downloader.download_success_dict[photo.from_album]  # after_photo
+        )
 
     def zip_photo(self, photo, image_list: list, zip_path: str, path_to_delete):
         """
@@ -797,6 +805,101 @@ class Img2pdfPlugin(JmOptionPlugin):
         pdf_dir = fix_filepath(pdf_dir, True)
         mkdir_if_not_exists(pdf_dir)
         return pdf_dir
+
+
+class LongImgPlugin(JmOptionPlugin):
+    plugin_key = 'long_img'
+
+    def invoke(self,
+               photo: JmPhotoDetail = None,
+               album: JmAlbumDetail = None,
+               downloader=None,
+               img_dir=None,
+               filename_rule='Pid',
+               delete_original_file=False,
+               **kwargs,
+               ):
+        if photo is None and album is None:
+            jm_log('wrong_usage', 'long_img必须运行在after_photo或after_album时')
+
+        try:
+            from PIL import Image
+        except ImportError:
+            self.warning_lib_not_install('PIL')
+            return
+
+        self.delete_original_file = delete_original_file
+
+        # 处理文件夹配置
+        img_dir = self.get_img_dir(img_dir)
+
+        # 处理生成的长图文件的路径
+        filename = DirRule.apply_rule_directly(album, photo, filename_rule)
+
+        # 长图路径
+        long_img_path = os.path.join(img_dir, f'{filename}.png')
+
+        # 调用 PIL 把 photo_dir 下的所有图片合并为长图
+        img_path_ls = self.write_img_2_long_img(long_img_path, album, photo)
+        self.log(f'Convert Successfully: JM{album or photo} → {long_img_path}')
+
+        # 执行删除
+        self.execute_deletion(img_path_ls)
+
+    def write_img_2_long_img(self, long_img_path, album: JmAlbumDetail, photo: JmPhotoDetail) -> List[str]:
+        import itertools
+        from PIL import Image
+
+        if album is None:
+            img_dir_items = [self.option.decide_image_save_dir(photo)]
+        else:
+            img_dir_items = [self.option.decide_image_save_dir(photo) for photo in album]
+
+        img_paths = itertools.chain(*map(files_of_dir, img_dir_items))
+        img_paths = filter(lambda x: not x.startswith('.'), img_paths)  # 过滤系统文件
+
+        images = self.open_images(img_paths)
+
+        try:
+            resample_method = Image.Resampling.LANCZOS
+        except AttributeError:
+            resample_method = Image.LANCZOS
+
+        min_img_width = min(img.width for img in images)
+        total_height = 0
+        for i, img in enumerate(images):
+            if img.width > min_img_width:
+                images[i] = img.resize((min_img_width, int(img.height * min_img_width / img.width)),
+                                       resample=resample_method)
+            total_height += images[i].height
+
+        long_img = Image.new('RGB', (min_img_width, total_height))
+        y_offset = 0
+        for img in images:
+            long_img.paste(img, (0, y_offset))
+            y_offset += img.height
+
+        long_img.save(long_img_path)
+        for img in images:
+            img.close()
+
+        return img_paths
+
+    def open_images(self, img_paths: List[str]):
+        images = []
+        for img_path in img_paths:
+            try:
+                img = Image.open(img_path)
+                images.append(img)
+            except IOError as e:
+                self.log(f"Failed to open image {img_path}: {e}", 'error')
+        return images
+
+    @staticmethod
+    def get_img_dir(img_dir: Optional[str]) -> str:
+        img_dir = fix_filepath(img_dir or os.getcwd())
+        mkdir_if_not_exists(img_dir)
+        return img_dir
 
 
 class JmServerPlugin(JmOptionPlugin):
